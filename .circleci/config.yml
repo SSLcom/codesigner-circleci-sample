@@ -1,0 +1,139 @@
+# Set the CI version.
+version: 2.1
+
+# Windows Orbs
+orbs:
+  win: circleci/windows@4.1.1
+
+# Invoke jobs via workflows
+# See: https://circleci.com/docs/2.0/configuration-reference/#workflows
+# Workflows orchestrate a set of jobs to be run. The jobs for this pipeline are # configured below
+workflows:
+  # The name of the workflow.
+  dotnet:
+    # Inside the workflow, you define the jobs you want to run.
+    jobs:
+      - build
+      - sign:
+          requires:
+            - build
+
+# Define a job to be invoked later in a workflow.
+# See: https://circleci.com/docs/2.0/configuration-reference/#jobs
+jobs:
+  # Below is the definition of your job to build and sign dll artifact
+  build:
+    # Create an environment variable
+    environment:
+        PROJECT_NAME: HelloWorld
+        PROJECT_VERSION: 0.0.1
+        DOTNET_VERSION: 3.1
+        WORKSPACE: /home/circleci/project
+
+    # These next lines define a Docker executor: https://circleci.com/docs/2.0/executor-types/
+    # You can specify an image from Dockerhub or use one of our Convenience Images from CircleCI's Developer Hub.
+    docker:
+      - image: mcr.microsoft.com/dotnet/sdk:3.1-bullseye
+
+    # Working directory for the job on Circle-CI
+    working_directory: /home/circleci/project
+    
+    # Add steps to the job
+    # See: https://circleci.com/docs/2.0/configuration-reference/#steps
+    steps:
+      # 1) Check out the source code so that the workflow can access it.
+      - checkout
+
+      # 2) Create Artifact Directory to store signed and unsigned artifact files
+      - run:
+          name: Create Artifacts Directory
+          command: |
+            mkdir -p ${WORKSPACE}/artifacts
+            mkdir -p ${WORKSPACE}/packages
+
+      # 3) Build a dotnet project or solution and all of its dependencies.
+      - run:
+          name: Compile Dotnet Library with Dotnet Core
+          command: | 
+            dotnet build dotnet/${PROJECT_NAME}.csproj -c Release
+
+      # 4) Copy artifact to artifacts directory
+      - run:
+          name: Copy Artifact File
+          command: | 
+            cp bin/Release/netcoreapp${DOTNET_VERSION}/${PROJECT_NAME}-${PROJECT_VERSION}.dll ${WORKSPACE}/packages/HelloWorld.dll
+
+      # 5) Persist the artifact to the artifacts directory for signing
+      - persist_to_workspace:
+          root: .
+          paths:
+            - packages/*
+
+  # Below is the definition of your job to sign artifacts
+  sign:
+      # Create an environment variable
+      environment:
+          ENVIRONMENT_NAME: TEST #PROD
+          COMMAND: sign
+          WORKSPACE: /home/circleci/project
+
+      # Artifact name for signing
+      parameters:
+          artifact-name:
+            type: string
+            default: ''
+
+      # These next lines define a Docker executor: https://circleci.com/docs/2.0/executor-types/
+      # You can specify an image from Dockerhub or use one of our Convenience Images from CircleCI's Developer Hub.
+      # Be sure to update the Docker image tag below to openjdk version of your application.
+      # A list of available CircleCI Docker Convenience Images are available here: https://circleci.com/developer/images/image/cimg/openjdk
+      docker:
+        - image: cimg/openjdk:17.0.3
+
+      # Working directory for the job on Circle-CI
+      working_directory: /home/circleci/project
+
+      # Add steps to the job
+      # See: https://circleci.com/docs/2.0/configuration-reference/#steps
+      steps:
+        # 1) Create Artifact Directory to store signed and unsigned artifact files
+        - run:
+            name: Create Artifacts Directory
+            command: |
+              mkdir -p ${WORKSPACE}/artifacts
+              mkdir -p ${WORKSPACE}/packages
+
+        # 2) Attach to Workspace in order to access the artifact file
+        - attach_workspace:
+            at: /home/circleci/project
+
+        # 3) Enable Docker for CodeSigner on Circle-CI
+        - setup_remote_docker:
+            name: Setup Remote Docker
+            version: 19.03.13
+            docker_layer_caching: true
+
+        # 4) Pull Codesigner Docker Image From Github Registry
+        - run:
+            name: Docker Pull Image
+            command: |
+              docker pull ghcr.io/sslcom/codesigner:latest
+              docker pull alpine:3.4
+
+        # 5) This is the step where the created DLL, JAR, EXE, MSI, PS1 (artifact) files will be signed with CodeSignTool.
+        - run:
+            name: Sign Artifact File
+            command: |
+              docker create -v /codesign/packages  --name codesign-in  alpine:3.4 /bin/true
+              docker create -v /codesign/artifacts --name codesign-out alpine:3.4 /bin/true
+              docker cp ${WORKSPACE}/packages/HelloWorld.dll codesign-in:/codesign/packages
+              docker run -i --rm --dns 8.8.8.8 --network host --volumes-from codesign-in --volumes-from codesign-out 
+                -e USERNAME=${USERNAME} -e PASSWORD=${PASSWORD} -e CREDENTIAL_ID=${CREDENTIAL_ID} -e TOTP_SECRET=${TOTP_SECRET} -e ENVIRONMENT_NAME=${ENVIRONMENT_NAME} 
+                ghcr.io/sslcom/codesigner:latest ${COMMAND} -input_file_path=/codesign/packages/HelloWorld.dll -output_dir_path=/codesign/artifacts
+              docker cp codesign-out:/codesign/artifacts/HelloWorld.dll ${WORKSPACE}/artifacts/HelloWorld.dll
+
+        # 6) This uploads artifacts from your workflow allowing you to share data between jobs and store data once a workflow is complete
+        - store_artifacts:
+            name: Upload Signed Files
+            path: /home/circleci/project/artifacts/HelloWorld.dll
+            destination: HelloWorld.dll
